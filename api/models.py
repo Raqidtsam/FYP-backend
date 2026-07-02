@@ -1,5 +1,8 @@
 from django.db import models
 from django.contrib.auth.hashers import make_password
+import random
+from datetime import timedelta
+from django.utils import timezone
 
 
 class Region(models.Model):
@@ -86,11 +89,18 @@ class User(models.Model):
     password_hash = models.CharField(max_length=255)
     nationality = models.CharField(max_length=100)
     contact = models.CharField(max_length=50)
+    profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True)
+
+    is_admin = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def save(self, *args, **kwargs):
-        if not self.pk or not self.password_hash.startswith('pbkdf2_sha256$'):
-            self.password_hash = make_password(self.password_hash)
+        # Only hash password for new users or if password changed
+        if self._state.adding:  # New object
+            if not self.password_hash.startswith('pbkdf2_sha256$'):
+                self.password_hash = make_password(self.password_hash)
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -98,3 +108,34 @@ class User(models.Model):
 
     class Meta:
         db_table = 'users'
+
+
+class PasswordResetToken(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    otp_code = models.CharField(max_length=6)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def is_valid(self):
+        return not self.is_used and timezone.now() < self.expires_at
+
+    @classmethod
+    def generate_otp(cls, user):
+        # Generate 6-digit OTP
+        otp = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+
+        # Expire in 10 minutes
+        expires_at = timezone.now() + timedelta(minutes=10)
+
+        # Create token
+        token = cls.objects.create(
+            user=user,
+            otp_code=otp,
+            expires_at=expires_at
+        )
+
+        return token
+
+    class Meta:
+        db_table = 'password_reset_tokens'
