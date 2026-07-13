@@ -9,6 +9,8 @@ from django.core.mail import send_mail
 from django.conf import settings
 from .models import User, PasswordResetToken
 from .validators import validate_password_strength
+from django.core.mail import send_mail
+
 
 
 @api_view(['POST'])
@@ -20,32 +22,99 @@ def register(request):
     nationality = request.data.get('nationality')
     contact = request.data.get('contact')
 
+    if not email or not password:
+        return Response({'error': 'Email and password required'}, status=400)
+
     is_valid, errors = validate_password_strength(password)
     if not is_valid:
-        return Response({
-            'error': 'Weak password',
-            'details': errors
-        }, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'error': 'Weak password', 'details': errors}, status=400)
 
-    if User.objects.filter(email=email).exists():
-        return Response(
-            {'error': 'Email already registered'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+    if User.objects.filter(email=email, is_verified=True).exists():
+        return Response({'error': 'Email already registered'}, status=400)
 
+    # Delete unverified user with same email if exists
+    User.objects.filter(email=email, is_verified=False).delete()
+
+    # Create user (unverified)
     user = User.objects.create(
         email=email,
         password_hash=password,
         full_name=full_name or '',
         nationality=nationality or '',
         contact=contact or '',
+        is_verified=False,
     )
 
+    # Generate OTP
+    token = PasswordResetToken.generate_otp(user)
+
+    # Send OTP via email
+    subject = 'Smart Geo Investment - Verify Your Account'
+    message = f'''
+Hello {user.full_name},
+
+Welcome to Smart Geo Investment! 
+
+Your verification code is: {token.otp_code}
+
+Please enter this code in the app to verify your account.
+
+This code will expire in 10 minutes.
+
+Regards,
+Smart Geo Investment Team
+Zanzibar, Tanzania
+'''
+
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+        print(f"Verification email sent to {user.email}")
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+
+    return Response({
+        'message': 'Verification code sent to your email',
+        'email': email,
+        'otp': token.otp_code,  # Remove in production
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_register_otp(request):
+    """Verify OTP after registration"""
+    email = request.data.get('email')
+    otp = request.data.get('otp')
+
+    if not email or not otp:
+        return Response({'error': 'Email and OTP required'}, status=400)
+
+    try:
+        user = User.objects.get(email=email, is_verified=False)
+    except User.DoesNotExist:
+        return Response({'error': 'Invalid or expired OTP'}, status=400)
+
+    token = PasswordResetToken.objects.filter(
+        user=user, otp_code=otp, is_used=False
+    ).order_by('-created_at').first()
+
+    if not token or not token.is_valid():
+        return Response({'error': 'Invalid or expired OTP'}, status=400)
+
+    # Verify user
+    user.is_verified = True
+    user.save()
+
+    # Mark OTP as used
+    token.is_used = True
+    token.save()
+
+    # Generate JWT token
     refresh = RefreshToken()
     refresh['user_id'] = user.pk
 
     return Response({
-        'message': 'Registration successful',
+        'message': 'Account verified successfully',
         'user': {
             'id': user.pk,
             'email': user.email,
@@ -71,7 +140,7 @@ def login(request):
         )
 
     try:
-        user = User.objects.get(email=email)
+        user = User.objects.get(email=email, is_verified=True)
     except User.DoesNotExist:
         return Response(
             {'error': 'Invalid email or password'},
@@ -95,11 +164,54 @@ def login(request):
             'full_name': user.full_name,
             'nationality': user.nationality,
             'contact': user.contact,
+            'is_admin': user.is_admin,
         },
         'access': str(refresh.access_token),
         'refresh': str(refresh),
     })
 
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_login_otp(request):
+    """Verify OTP for login"""
+    email = request.data.get('email')
+    otp = request.data.get('otp')
+
+    if not email or not otp:
+        return Response({'error': 'Email and OTP required'}, status=400)
+
+    try:
+        user = User.objects.get(email=email, is_verified=True)
+    except User.DoesNotExist:
+        return Response({'error': 'Invalid email or OTP'}, status=400)
+
+    token = PasswordResetToken.objects.filter(
+        user=user, otp_code=otp, is_used=False
+    ).order_by('-created_at').first()
+
+    if not token or not token.is_valid():
+        return Response({'error': 'Invalid or expired OTP'}, status=400)
+
+    token.is_used = True
+    token.save()
+
+    # Generate JWT token
+    refresh = RefreshToken()
+    refresh['user_id'] = user.pk
+
+    return Response({
+        'message': 'Login successful',
+        'user': {
+            'id': user.pk,
+            'email': user.email,
+            'full_name': user.full_name,
+            'nationality': user.nationality,
+            'contact': user.contact,
+        },
+        'access': str(refresh.access_token),
+        'refresh': str(refresh),
+    })
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
