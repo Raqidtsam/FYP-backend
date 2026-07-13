@@ -9,4 +9,5 @@ __pycache__/
 .DS_Store
 migrations/0*.py
 staticfiles/
-media/
+media/firebase-key.json
+backups/
