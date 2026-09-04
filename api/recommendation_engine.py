@@ -4,13 +4,13 @@ from .models import District, EconomicActivity, DistrictActivity, InvestmentSect
 class RecommendationEngine:
     """AI-powered recommendation engine for Zanzibar investments"""
 
-    # Map economic activities to suitable investment sectors
+    # Map economic activities to suitable investment sectors (English names)
     ACTIVITY_TO_SECTOR = {
-        'Utalii': ['Hoteli na Malazi', 'Miundombinu ya Utalii', 'Usafiri wa Baharini'],
-        'Uvuvi': ['Uvuvi wa Kisasa'],
-        'Kilimo': ['Kilimo cha Mwani', 'Viwanda vya Karafuu'],
-        'Biashara': ['Biashara ya Jumla'],
-        'Ujenzi': ['Miundombinu ya Utalii'],
+        'Utalii': ['Hotels and Accommodation', 'Tourism Infrastructure', 'Marine Transport'],
+        'Uvuvi': ['Modern Fishing'],
+        'Kilimo': ['Seaweed Farming', 'Clove Processing'],
+        'Biashara': ['Wholesale Business'],
+        'Ujenzi': ['Tourism Infrastructure'],
     }
 
     # Capital level mapping
@@ -140,26 +140,26 @@ class RecommendationEngine:
         return 60
 
     def _generate_reason(self, district_name, sector_name, activity, dominance, score):
-        """Generate human-readable reason for recommendation"""
+        """Generate human-readable reason for recommendation - ENGLISH"""
 
         dominance_text = {
-            'High': 'shughuli kuu',
-            'Medium': 'shughuli ya wastani',
-            'Low': 'shughuli ndogo',
+            'High': 'a major economic activity',
+            'Medium': 'a moderate economic activity',
+            'Low': 'a minor economic activity',
         }
 
         score_text = ''
         if score >= 80:
-            score_text = 'Pendekezo kali'
+            score_text = 'Strongly Recommended'
         elif score >= 60:
-            score_text = 'Pendekezo zuri'
+            score_text = 'Good Opportunity'
         else:
-            score_text = 'Pendekezo la wastani'
+            score_text = 'Moderate Opportunity'
 
         return (
-            f'{score_text}: {sector_name} inafaa katika {district_name}. '
-            f'{activity} ni {dominance_text.get(dominance, "inayopatikana")} '
-            f'katika eneo hili.'
+            f'{score_text}: {sector_name} is suitable in {district_name}. '
+            f'{activity} is {dominance_text.get(dominance, "present")} '
+            f'in this area.'
         )
 
 

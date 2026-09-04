@@ -2,15 +2,24 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from .models import User, District, Region, EconomicActivity, InvestmentSector, Recommendation
+from rest_framework_simplejwt.tokens import AccessToken
 from django.db import models
-import os
+from django.db.models import Count, Avg
 from django.utils import timezone
-from django.core.management import call_command
 from django.core.mail import send_mail
-from .recommendation_engine import engine
 from django.conf import settings as django_settings
+from django.views.decorators.csrf import csrf_exempt
+import os
 
+from .models import (
+    User, District, Region, EconomicActivity, InvestmentSector,
+    Recommendation, FCMToken, InvestmentLocation, InAppNotification
+)
+from .recommendation_engine import engine
+from .notifications import send_multicast_notification
+
+
+# ============ DASHBOARD ============
 
 @api_view(['GET'])
 def admin_dashboard(request):
@@ -20,6 +29,7 @@ def admin_dashboard(request):
     total_regions = Region.objects.count()
     total_sectors = InvestmentSector.objects.count()
     total_recommendations = Recommendation.objects.count()
+    total_investment_locations = InvestmentLocation.objects.count()
 
     recent_users = User.objects.order_by('-created_at')[:5].values(
         'id', 'full_name', 'email', 'nationality', 'created_at'
@@ -32,18 +42,42 @@ def admin_dashboard(request):
             'total_regions': total_regions,
             'total_sectors': total_sectors,
             'total_recommendations': total_recommendations,
+            'total_investment_locations': total_investment_locations,
         },
         'recent_users': list(recent_users),
     })
 
 
+# ============ USER MANAGEMENT ============
+
 @api_view(['GET'])
 def admin_users(request):
     """Get all users"""
     users = User.objects.all().values(
-        'id', 'full_name', 'email', 'nationality', 'contact', 'is_active', 'is_admin', 'created_at'
+        'id', 'full_name', 'email', 'nationality', 'contact',
+        'is_active', 'is_admin', 'is_investment_officer', 'is_verified', 'created_at'
     )
     return Response(list(users))
+
+
+@api_view(['GET'])
+def admin_user_detail(request, user_id):
+    """Get user details"""
+    try:
+        user = User.objects.get(pk=user_id)
+        return Response({
+            'id': user.pk,
+            'email': user.email,
+            'full_name': user.full_name,
+            'nationality': user.nationality,
+            'contact': user.contact,
+            'is_active': user.is_active,
+            'is_admin': user.is_admin,
+            'is_investment_officer': user.is_investment_officer,
+            'is_verified': user.is_verified,
+        })
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=404)
 
 
 @api_view(['PUT'])
@@ -53,8 +87,10 @@ def toggle_user_status(request, user_id):
         user = User.objects.get(pk=user_id)
         user.is_active = not user.is_active
         user.save()
-        return Response(
-            {'message': f'User {"activated" if user.is_active else "deactivated"}', 'is_active': user.is_active})
+        return Response({
+            'message': f'User {"activated" if user.is_active else "deactivated"}',
+            'is_active': user.is_active
+        })
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=404)
 
@@ -66,7 +102,25 @@ def toggle_admin_status(request, user_id):
         user = User.objects.get(pk=user_id)
         user.is_admin = not user.is_admin
         user.save()
-        return Response({'message': f'Admin status: {user.is_admin}', 'is_admin': user.is_admin})
+        return Response({
+            'message': f'Admin status: {user.is_admin}',
+            'is_admin': user.is_admin
+        })
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=404)
+
+
+@api_view(['PUT'])
+def toggle_officer_status(request, user_id):
+    """Make/Remove investment officer"""
+    try:
+        user = User.objects.get(pk=user_id)
+        user.is_investment_officer = not user.is_investment_officer
+        user.save()
+        return Response({
+            'message': f'Officer status: {user.is_investment_officer}',
+            'is_investment_officer': user.is_investment_officer
+        })
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=404)
 
@@ -76,14 +130,31 @@ def delete_user(request, user_id):
     """Delete user"""
     try:
         user = User.objects.get(pk=user_id)
-        # Prevent deleting yourself
-        if request.admin_user and request.admin_user.pk == user.pk:
-            return Response({'error': 'Cannot delete yourself'}, status=400)
         user.delete()
         return Response({'message': 'User deleted'})
     except User.DoesNotExist:
         return Response({'error': 'User not found'}, status=404)
 
+
+@api_view(['PUT'])
+def admin_reset_password(request, user_id):
+    """Reset user password"""
+    new_password = request.data.get('new_password')
+
+    if not new_password or len(new_password) < 6:
+        return Response({'error': 'Password must be at least 6 characters'}, status=400)
+
+    try:
+        user = User.objects.get(pk=user_id)
+        from django.contrib.auth.hashers import make_password
+        user.password_hash = make_password(new_password)
+        user.save()
+        return Response({'message': f'Password reset for {user.email}'})
+    except User.DoesNotExist:
+        return Response({'error': 'User not found'}, status=404)
+
+
+# ============ DISTRICT MANAGEMENT ============
 
 @api_view(['GET'])
 def admin_districts(request):
@@ -111,12 +182,16 @@ def update_district(request, district_id):
         return Response({'error': 'District not found'}, status=404)
 
 
+# ============ ECONOMIC ACTIVITIES ============
+
 @api_view(['GET'])
 def admin_activities(request):
     """Get all economic activities"""
     activities = EconomicActivity.objects.all().values('id', 'name', 'category', 'description')
     return Response(list(activities))
 
+
+# ============ RECOMMENDATIONS ============
 
 @api_view(['GET'])
 def admin_recommendations(request):
@@ -129,7 +204,7 @@ def admin_recommendations(request):
 
 @api_view(['POST'])
 def admin_generate_recommendations(request):
-    """Generate AI recommendations for all districts or specific one"""
+    """Generate AI recommendations"""
     district_id = request.data.get('district_id')
     try:
         count = engine.generate_recommendations(district_id)
@@ -143,7 +218,7 @@ def admin_generate_recommendations(request):
 
 @api_view(['POST'])
 def admin_add_recommendation(request):
-    """Manually add a recommendation"""
+    """Manually add recommendation"""
     district_id = request.data.get('district_id')
     sector_id = request.data.get('sector_id')
     score = request.data.get('score', 50)
@@ -159,10 +234,7 @@ def admin_add_recommendation(request):
         return Response({'error': 'Invalid district or sector'}, status=404)
 
     rec = Recommendation.objects.create(
-        district=district,
-        sector=sector,
-        score=score,
-        reason=reason
+        district=district, sector=sector, score=score, reason=reason
     )
     return Response({
         'message': 'Recommendation added',
@@ -175,7 +247,7 @@ def admin_add_recommendation(request):
 
 @api_view(['PUT'])
 def admin_update_recommendation(request, rec_id):
-    """Update recommendation score or reason"""
+    """Update recommendation"""
     score = request.data.get('score')
     reason = request.data.get('reason')
 
@@ -193,7 +265,7 @@ def admin_update_recommendation(request, rec_id):
 
 @api_view(['DELETE'])
 def admin_delete_recommendation(request, rec_id):
-    """Delete a recommendation"""
+    """Delete recommendation"""
     try:
         rec = Recommendation.objects.get(pk=rec_id)
         rec.delete()
@@ -207,13 +279,11 @@ def admin_recommendation_stats(request):
     """Get recommendation statistics"""
     total = Recommendation.objects.count()
     by_district = Recommendation.objects.values('district__name').annotate(
-        count=models.Count('id'),
-        avg_score=models.Avg('score')
+        count=models.Count('id'), avg_score=models.Avg('score')
     ).order_by('-count')[:10]
 
     by_sector = Recommendation.objects.values('sector__name').annotate(
-        count=models.Count('id'),
-        avg_score=models.Avg('score')
+        count=models.Count('id'), avg_score=models.Avg('score')
     ).order_by('-count')[:10]
 
     return Response({
@@ -226,8 +296,77 @@ def admin_recommendation_stats(request):
 @api_view(['GET'])
 def admin_sectors(request):
     """Get all investment sectors"""
-    sectors = InvestmentSector.objects.all().values('id', 'name', 'capital_required', 'estimated_roi', 'description')
+    sectors = InvestmentSector.objects.all().values(
+        'id', 'name', 'capital_required', 'estimated_roi', 'description'
+    )
     return Response(list(sectors))
+
+
+# ============ REPORTS ============
+
+@api_view(['GET'])
+def admin_reports(request):
+    """Get comprehensive reports for admin"""
+    by_type = list(
+        InvestmentLocation.objects.values('investment_type')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
+
+    by_district = list(
+        InvestmentLocation.objects.values('district__name')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
+
+    by_nationality = list(
+        User.objects.values('nationality')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+    )
+
+    total_investors = User.objects.filter(is_admin=False, is_investment_officer=False).count()
+    total_officers = User.objects.filter(is_investment_officer=True).count()
+
+    # Single table data
+    locations_table = list(InvestmentLocation.objects.all().values(
+        'id', 'name', 'district__name', 'investment_type', 'land_use',
+        'price_per_hectare', 'distance_to_ocean_km'
+    ))
+
+    return Response({
+        'locations_table': locations_table,
+        'investment_areas': {
+            'total': InvestmentLocation.objects.count(),
+            'by_type': by_type,
+            'by_district': by_district,
+            'avg_price': InvestmentLocation.objects.aggregate(avg=Avg('price_per_hectare'))['avg'] or 0,
+        },
+        'investors': {
+            'total': total_investors,
+            'by_nationality': by_nationality,
+            'total_officers': total_officers,
+        },
+    })
+
+
+@api_view(['GET'])
+def admin_export_report(request):
+    """Export report as JSON"""
+    locations = InvestmentLocation.objects.all().values(
+        'name', 'district__name', 'investment_type', 'land_use',
+        'price_per_hectare', 'distance_to_ocean_km'
+    )
+
+    investors = User.objects.filter(is_admin=False, is_investment_officer=False).values(
+        'full_name', 'email', 'nationality', 'contact', 'created_at'
+    )
+
+    return Response({
+        'generated_at': timezone.now().isoformat(),
+        'investment_areas': list(locations),
+        'investors': list(investors),
+    })
 
 
 # ============ SYSTEM SETTINGS ============
@@ -272,7 +411,6 @@ def admin_backup_database(request):
         filename = f'backup_{timestamp}.sql'
         filepath = os.path.join(backup_dir, filename)
 
-        # Run pg_dump
         os.system(f'pg_dump -U smart_geo_user -h localhost smart_geo_investment > {filepath}')
 
         return Response({
@@ -304,12 +442,11 @@ def admin_test_email(request):
 @api_view(['GET'])
 def admin_audit_log(request):
     """Get recent admin activity"""
-    # Simple audit - return recent registered users and recommendations
     recent_users = User.objects.order_by('-created_at')[:20].values(
         'id', 'full_name', 'email', 'created_at'
     )
     recent_recs = Recommendation.objects.order_by('-id')[:20].values(
-        'id', 'district__name', 'sector__name', 'score', 'id'
+        'id', 'district__name', 'sector__name', 'score'
     )
 
     return Response({
@@ -318,10 +455,7 @@ def admin_audit_log(request):
     })
 
 
-from .models import FCMToken
-from .notifications import send_multicast_notification
-from django.views.decorators.csrf import csrf_exempt
-
+# ============ NOTIFICATIONS ============
 
 @api_view(['POST'])
 @csrf_exempt
@@ -341,7 +475,6 @@ def register_fcm_token(request):
         user_id = access_token.get('user_id')
         user = User.objects.get(pk=user_id)
 
-        # Update or create token
         FCMToken.objects.update_or_create(
             token=token,
             defaults={'user': user, 'device': request.data.get('device', 'android')}
@@ -352,26 +485,25 @@ def register_fcm_token(request):
 
 
 @api_view(['POST'])
+@csrf_exempt
 def admin_send_notification(request):
-    """Admin sends push notification"""
+    """Admin sends push notification to all users"""
     title = request.data.get('title', 'Smart Geo Investment')
     body = request.data.get('body', '')
-    user_ids = request.data.get('user_ids', [])  # Empty = all users
 
     if not body:
         return Response({'error': 'Message body required'}, status=400)
 
-    # Get FCM tokens
-    tokens_query = FCMToken.objects.all()
-    if user_ids:
-        tokens_query = tokens_query.filter(user_id__in=user_ids)
-
-    tokens = list(tokens_query.values_list('token', flat=True))
+    tokens = list(FCMToken.objects.all().values_list('token', flat=True))
 
     if not tokens:
-        return Response({'error': 'No device tokens found'}, status=400)
+        return Response({
+            'message': 'No users have registered devices yet',
+            'total_tokens': 0,
+            'success': 0,
+            'failed': 0,
+        }, status=200)
 
-    # Send notification
     data = {
         'type': 'investment_alert',
         'screen': 'dashboard',
@@ -380,8 +512,90 @@ def admin_send_notification(request):
     result = send_multicast_notification(tokens, title, body, data)
 
     return Response({
-        'message': 'Notification sent',
+        'message': f'Notification sent to {result.get("success_count", 0)} devices',
         'total_tokens': len(tokens),
         'success': result.get('success_count', 0),
         'failed': result.get('failure_count', 0),
     })
+
+
+@api_view(['POST'])
+def admin_send_in_app_notification(request):
+    """Admin sends in-app notification to all users"""
+    title = request.data.get('title', 'Smart Geo Investment')
+    body = request.data.get('body', '')
+
+    if not body:
+        return Response({'error': 'Message body required'}, status=400)
+
+    users = User.objects.filter(is_admin=False, is_active=True)
+    count = 0
+
+    for user in users:
+        InAppNotification.objects.create(
+            title=title,
+            body=body,
+            user=user,
+        )
+        count += 1
+
+    return Response({
+        'message': f'Notification sent to {count} users',
+        'count': count,
+    })
+
+
+@api_view(['GET'])
+def get_in_app_notifications(request):
+    """Get notifications for current user"""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return Response({'error': 'Authentication required'}, status=401)
+
+    token = auth_header.replace('Bearer ', '')
+    try:
+        access_token = AccessToken(token)
+        user_id = access_token.get('user_id')
+        user = User.objects.get(pk=user_id)
+
+        notifications = InAppNotification.objects.filter(user=user).order_by('-created_at')
+
+        data = [
+            {
+                'id': n.pk,
+                'title': n.title,
+                'body': n.body,
+                'is_read': n.is_read,
+                'created_at': n.created_at.isoformat(),
+            }
+            for n in notifications
+        ]
+
+        unread_count = notifications.filter(is_read=False).count()
+
+        return Response({
+            'notifications': data,
+            'unread_count': unread_count,
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=400)
+
+
+@api_view(['POST'])
+def mark_notification_read(request, notification_id):
+    """Mark notification as read"""
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return Response({'error': 'Authentication required'}, status=401)
+
+    token = auth_header.replace('Bearer ', '')
+    try:
+        access_token = AccessToken(token)
+        user_id = access_token.get('user_id')
+
+        notification = InAppNotification.objects.get(pk=notification_id, user_id=user_id)
+        notification.is_read = True
+        notification.save()
+        return Response({'message': 'Marked as read'})
+    except InAppNotification.DoesNotExist:
+        return Response({'error': 'Notification not found'}, status=404)

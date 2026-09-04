@@ -92,6 +92,7 @@ class User(models.Model):
     profile_picture = models.ImageField(upload_to='profile_pictures/', null=True, blank=True)
 
     is_admin = models.BooleanField(default=False)
+    is_investment_officer = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_verified = models.BooleanField(default=False)
 
@@ -171,3 +172,76 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.sender.full_name}: {self.subject}"
+
+
+class InvestmentLocation(models.Model):
+    district = models.ForeignKey(District, on_delete=models.CASCADE, related_name='investment_locations')
+    name = models.CharField(max_length=200)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7)
+    size_hectares = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    land_use = models.CharField(max_length=100, null=True, blank=True)  # Tourism, Residential, Commercial
+    distance_to_ocean_km = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    nearby_locations = models.TextField(null=True, blank=True)  # JSON string
+    owner_name = models.CharField(max_length=200, null=True, blank=True)
+    owner_phone = models.CharField(max_length=50, null=True, blank=True)
+    owner_email = models.EmailField(null=True, blank=True)
+    owner_address = models.TextField(null=True, blank=True)
+    zipa_phone = models.CharField(max_length=50, default='+255 24 223 3026')
+    zipa_email = models.EmailField(default='info@zipa.go.tz')
+    zipa_address = models.TextField(default='Mazizini, Zanzibar')
+    price_per_hectare = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    price_negotiable = models.BooleanField(default=True)
+    description = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    investment_type = models.CharField(
+        max_length=50,
+        choices=[
+            ('Tourism', 'Tourism & Hospitality'),
+            ('Residential', 'Residential'),
+            ('Commercial', 'Commercial'),
+            ('Fishing', 'Fishing'),
+            ('Agriculture', 'Agriculture'),
+            ('Industrial', 'Industrial'),
+        ],
+        default='Tourism'
+    )
+
+    class Meta:
+        db_table = 'investment_locations'
+
+    def __str__(self):
+        return f"{self.name} - {self.district.name}"
+
+
+class InAppNotification(models.Model):
+    title = models.CharField(max_length=200)
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_read = models.BooleanField(default=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications', null=True, blank=True)
+
+    class Meta:
+        db_table = 'in_app_notifications'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title
+
+class Transaction(models.Model):
+    transaction_type = models.CharField(max_length=50)  # Investment, Registration, Search, etc.
+    description = models.TextField()
+    amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, null=True, blank=True)
+    district = models.ForeignKey(District, on_delete=models.CASCADE, null=True, blank=True)
+    investment_location = models.ForeignKey(InvestmentLocation, on_delete=models.CASCADE, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'transactions'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.transaction_type} - {self.created_at}"
+
+

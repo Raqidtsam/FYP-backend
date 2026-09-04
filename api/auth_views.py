@@ -9,7 +9,6 @@ from django.core.mail import send_mail
 from django.conf import settings
 from .models import User, PasswordResetToken
 from .validators import validate_password_strength
-from django.core.mail import send_mail
 
 
 
@@ -35,10 +34,13 @@ def register(request):
     # Delete unverified user with same email if exists
     User.objects.filter(email=email, is_verified=False).delete()
 
+    # ✅ FIX: Hash the password before storing
+    hashed_password = make_password(password)
+
     # Create user (unverified)
     user = User.objects.create(
         email=email,
-        password_hash=password,
+        password_hash=hashed_password,  # ✅ Stored hashed
         full_name=full_name or '',
         nationality=nationality or '',
         contact=contact or '',
@@ -66,16 +68,19 @@ Smart Geo Investment Team
 Zanzibar, Tanzania
 '''
 
+    print(f"📧 Sending email to: {user.email}")
+    print(f"🔑 OTP: {token.otp_code}")
+
     try:
         send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
-        print(f"Verification email sent to {user.email}")
+        print(f"✅ Verification email sent to {user.email}")
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"❌ Failed to send email: {e}")
 
     return Response({
         'message': 'Verification code sent to your email',
         'email': email,
-        'otp': token.otp_code,  # Remove in production
+        'otp': token.otp_code,  # Keep for testing
     })
 
 
@@ -133,6 +138,8 @@ def login(request):
     email = request.data.get('email')
     password = request.data.get('password')
 
+    print(f"🔵 Login attempt: {email}")
+
     if not email or not password:
         return Response(
             {'error': 'Email and password required'},
@@ -141,13 +148,18 @@ def login(request):
 
     try:
         user = User.objects.get(email=email, is_verified=True)
+        print(f"✅ User found: {user.email}")
+        print(f"   Hash: {user.password_hash[:50]}...")
     except User.DoesNotExist:
+        print(f"❌ User not found or not verified: {email}")
         return Response(
             {'error': 'Invalid email or password'},
             status=status.HTTP_401_UNAUTHORIZED
         )
 
+    # ✅ Check password correctly
     if not check_password(password, user.password_hash):
+        print(f"❌ Password invalid for: {email}")
         return Response(
             {'error': 'Invalid email or password'},
             status=status.HTTP_401_UNAUTHORIZED
@@ -155,6 +167,8 @@ def login(request):
 
     refresh = RefreshToken()
     refresh['user_id'] = user.pk
+
+    print(f"✅ Login successful: {email}")
 
     return Response({
         'message': 'Login successful',
@@ -165,6 +179,7 @@ def login(request):
             'nationality': user.nationality,
             'contact': user.contact,
             'is_admin': user.is_admin,
+            'is_investment_officer': user.is_investment_officer,
         },
         'access': str(refresh.access_token),
         'refresh': str(refresh),
@@ -212,6 +227,7 @@ def verify_login_otp(request):
         'access': str(refresh.access_token),
         'refresh': str(refresh),
     })
+
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
